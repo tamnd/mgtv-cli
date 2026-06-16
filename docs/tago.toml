@@ -1,0 +1,10 @@
+title       = "mgtv"
+baseURL     = "https://mgtv-cli.tamnd.com/"
+description = "Browse Mango TV content (mgtv.com)"
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/mgtv-cli"
