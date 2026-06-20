@@ -1,0 +1,24 @@
+{
+  "code": 200,
+  "msg": "success",
+  "data": {
+    "info": {
+      "clipId": "867784",
+      "videoId": "24423183",
+      "clipName": "爸爸当家 第五季",
+      "fstlvlType": "综艺",
+      "clipImage": "https://img.mgtv.com/test.jpg",
+      "detail": {
+        "area": "内地",
+        "updateInfo": "更新至2026-06-15期",
+        "releaseTime": "2026-05-18",
+        "kind": "芒果出品 / 亲子 / 真人秀",
+        "language": "普通话",
+        "story": "《爸爸当家5》从四大维度全面升级呈现。",
+        "director": "未知",
+        "television": "芒果TV",
+        "url": "/b/867784/24423183.html"
+      }
+    }
+  }
+}

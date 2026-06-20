@@ -1,80 +1,85 @@
+// Package mgtv: kit Domain registration for mgtv.com (Mango TV / 芒果TV).
+//
+// Import this package blank in a multi-domain host to enable the mgtv:// driver:
+//
+//	import _ "github.com/tamnd/mgtv-cli/mgtv"
+//
+// The Domain also backs the standalone mgtv binary (see cli.NewApp).
 package mgtv
 
 import (
 	"context"
-	"net/url"
+	"regexp"
 	"strings"
 
 	"github.com/tamnd/any-cli/kit"
 	"github.com/tamnd/any-cli/kit/errs"
 )
 
-// domain.go exposes mgtv as a kit Domain: a driver that a multi-domain
-// host (ant) enables with a single blank import,
-//
-//	import _ "github.com/tamnd/mgtv-cli/mgtv"
-//
-// exactly as a database/sql program enables a driver with `import _
-// "github.com/lib/pq"`. The init below registers it; the host then dereferences
-// mgtv:// URIs by routing to the operations Register installs. The same
-// Domain also builds the standalone mgtv binary (see cli.NewApp), so the
-// binary and a host share one source of truth.
-//
-// This is the scaffold's starting point: one resource type, "page", served by a
-// resolver op and a list op. Add your real types here as you model the site.
+// BaseURL is used for URL construction in Locate.
+const BaseURL = "https://www.mgtv.com"
+
 func init() { kit.Register(Domain{}) }
 
-// Domain is the mgtv driver. It carries no state; the per-run client is
-// built by the factory Register hands kit.
+// Domain is the Mango TV driver. It carries no state.
 type Domain struct{}
 
-// Info describes the scheme, the hostnames a pasted link is matched against, and
-// the identity reused for the binary's help and version.
+// Info describes the scheme, hostnames, and identity for the kit framework.
 func (Domain) Info() kit.DomainInfo {
 	return kit.DomainInfo{
 		Scheme: "mgtv",
-		Hosts:  []string{Host},
+		Hosts:  []string{Host, "www.mgtv.com"},
 		Identity: kit.Identity{
 			Binary: "mgtv",
 			Short:  "Browse Mango TV content (mgtv.com)",
-			Long: `Browse Mango TV content (mgtv.com)
+			Long: `mgtv turns mgtv.com into a fast, scriptable command line.
 
-mgtv reads public mgtv data over plain HTTPS, shapes it into
-clean records, and prints output that pipes into the rest of your tools. No API
-key, nothing to run alongside it.`,
+Browse trending variety shows, dramas, and movies from Mango TV (芒果TV),
+one of China's major streaming platforms - all without an account or API key.
+
+Quick start:
+  mgtv hot                        trending content from all categories
+  mgtv hot --type variety -n 10   top 10 variety shows
+  mgtv search 综艺                 search for variety content
+  mgtv video 867784               fetch metadata for one series
+  mgtv video 867784 -o json       output as JSON`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/mgtv-cli",
 		},
 	}
 }
 
-// Register installs the client factory and every operation onto app. A resolver
-// op (Single) names its own record type and answers `ant get`; a List op
-// enumerates a parent resource's members and answers `ant ls`.
+// Register installs the client factory and all three MGTV operations onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	// Resolver op: one record per id, the home of `mgtv page` and
-	// `ant get mgtv://page/<id>`.
-	kit.Handle(app, kit.OpMeta{Name: "page", Group: "read", Single: true,
-		Summary: "Fetch a page by path or URL", URIType: "page", Resolver: true,
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, getPage)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "hot",
+		Group:   "browse",
+		Summary: "Trending/hot content from category pages",
+	}, hotVideos)
 
-	// List op: members of a page, the home of `mgtv links` and `ant ls`.
-	// It emits page stubs, so every listed member is itself an addressable
-	// mgtv://page/ URI a host can follow.
-	kit.Handle(app, kit.OpMeta{Name: "links", Group: "read", List: true,
-		Summary: "List the pages a page links to", URIType: "page",
-		Args: []kit.Arg{{Name: "ref", Help: "page path or URL"}}}, listLinks)
+	kit.Handle(app, kit.OpMeta{
+		Name:    "search",
+		Group:   "discover",
+		Summary: "Search content by keyword",
+		Args:    []kit.Arg{{Name: "query", Help: "keyword to search for"}},
+	}, searchVideos)
+
+	kit.Handle(app, kit.OpMeta{
+		Name:     "video",
+		Group:    "fetch",
+		Single:   true,
+		Resolver: true,
+		URIType:  "video",
+		Summary:  "Fetch metadata for a series by clip ID",
+		Args:     []kit.Arg{{Name: "id", Help: "clip ID (e.g. 867784)"}},
+	}, getVideo)
 }
 
-// newClient builds the client from the host-resolved config, so a host and the
-// standalone binary pace and identify themselves the same way.
+// newClient builds a Client from the resolved kit Config.
 func newClient(_ context.Context, cfg kit.Config) (any, error) {
-	c := NewClient()
-	if cfg.UserAgent != "" {
-		c.UserAgent = cfg.UserAgent
-	}
+	c := DefaultConfig()
 	if cfg.Rate > 0 {
 		c.Rate = cfg.Rate
 	}
@@ -82,92 +87,108 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 		c.Retries = cfg.Retries
 	}
 	if cfg.Timeout > 0 {
-		c.HTTP.Timeout = cfg.Timeout
+		c.Timeout = cfg.Timeout
 	}
-	return c, nil
+	if cfg.UserAgent != "" {
+		c.UserAgent = cfg.UserAgent
+	}
+	return NewClientConfig(c), nil
 }
 
-// --- inputs ---
-//
-// Each handler takes a typed input struct. kit fills the fields from the tags:
-// kit:"arg" is a positional argument, kit:"flag,inherit" binds the framework's
-// shared flag of the same name, and kit:"inject" receives the client newClient
-// builds.
+// --- input structs ---
 
-type pageRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
+type hotInput struct {
+	Type   string  `kit:"flag" help:"category: variety, tv, movie, all" default:"all"`
+	Limit  int     `kit:"flag,inherit" help:"max results" default:"20"`
 	Client *Client `kit:"inject"`
 }
 
-type listRef struct {
-	Ref    string  `kit:"arg" help:"page path or URL"`
-	Limit  int     `kit:"flag,inherit" help:"max results"`
+type searchInput struct {
+	Query  string  `kit:"arg" help:"keyword to search for"`
+	Limit  int     `kit:"flag,inherit" help:"max results" default:"20"`
+	Client *Client `kit:"inject"`
+}
+
+type videoInput struct {
+	ID     string  `kit:"arg" help:"clip ID (e.g. 867784)"`
 	Client *Client `kit:"inject"`
 }
 
 // --- handlers ---
 
-func getPage(ctx context.Context, in pageRef, emit func(*Page) error) error {
-	p, err := in.Client.GetPage(ctx, pagePath(in.Ref))
+func hotVideos(ctx context.Context, in hotInput, emit func(Video) error) error {
+	videos, err := in.Client.HotVideos(ctx, in.Type, in.Limit)
 	if err != nil {
-		return mapErr(err)
+		return err
 	}
-	return emit(p)
-}
-
-func listLinks(ctx context.Context, in listRef, emit func(*Page) error) error {
-	pages, err := in.Client.PageLinks(ctx, pagePath(in.Ref), in.Limit)
-	if err != nil {
-		return mapErr(err)
-	}
-	for _, p := range pages {
-		if err := emit(p); err != nil {
+	for _, v := range videos {
+		if err := emit(v); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// --- Resolver: the URI-native string functions, pure and network-free ---
-
-// Classify turns any accepted input — a bare path or a full mgtv.com URL —
-// into the canonical (type, id), so `ant resolve` and `ant url` touch no network.
-func (Domain) Classify(input string) (uriType, id string, err error) {
-	id = pagePath(input)
-	if id == "" {
-		return "", "", errs.Usage("unrecognized mgtv reference: %q", input)
+func searchVideos(ctx context.Context, in searchInput, emit func(Video) error) error {
+	videos, err := in.Client.SearchVideos(ctx, in.Query, in.Limit)
+	if err != nil {
+		return err
 	}
-	return "page", id, nil
+	for _, v := range videos {
+		if err := emit(v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Locate is the inverse: the live https URL for a (type, id).
+func getVideo(ctx context.Context, in videoInput, emit func(*Video) error) error {
+	v, err := in.Client.GetVideo(ctx, in.ID)
+	if err != nil {
+		return mapErr(err)
+	}
+	return emit(v)
+}
+
+// --- Resolver ---
+
+var clipIDDigits = regexp.MustCompile(`^(\d+)$`)
+var clipIDFromURL = regexp.MustCompile(`/b/(\d+)`)
+
+// Classify turns any accepted input into the canonical (uriType, id).
+func (Domain) Classify(input string) (uriType, id string, err error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return "", "", errs.Usage("mgtv: empty input")
+	}
+	// Numeric clip ID
+	if clipIDDigits.MatchString(input) {
+		return "video", input, nil
+	}
+	// URL containing /b/<id>
+	if m := clipIDFromURL.FindStringSubmatch(input); m != nil {
+		return "video", m[1], nil
+	}
+	return "", "", errs.Usage("mgtv: unrecognized reference: %q", input)
+}
+
+// Locate returns the canonical Mango TV URL for a (uriType, id).
 func (Domain) Locate(uriType, id string) (string, error) {
-	if uriType != "page" {
+	switch uriType {
+	case "video":
+		return BaseURL + "/b/" + id + ".html", nil
+	default:
 		return "", errs.Usage("mgtv has no resource type %q", uriType)
 	}
-	return BaseURL + "/" + strings.Trim(id, "/"), nil
 }
 
-// --- helpers ---
-
-// pagePath turns any accepted input into the canonical page id: the path of a
-// full URL on this host, or a bare path with its slashes trimmed.
-func pagePath(input string) string {
-	input = strings.TrimSpace(input)
-	if u, err := url.Parse(input); err == nil && (u.Scheme == "http" || u.Scheme == "https") {
-		return strings.Trim(u.Path, "/")
-	}
-	return strings.Trim(input, "/")
-}
-
-// mapErr converts a library error into the kit error kind that carries the right
-// exit code, so a host renders the same outcomes the standalone binary does. As
-// you add sentinel errors to the library, map them here, for example:
-//
-//	case errors.Is(err, ErrNotFound):
-//		return errs.NotFound("%s", err.Error())
-//	case errors.Is(err, ErrRateLimited):
-//		return errs.RateLimited("%s", err.Error())
+// mapErr translates library errors into kit error kinds with appropriate exit codes.
 func mapErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if err == ErrNotFound {
+		return errs.NotFound("%s", err.Error())
+	}
 	return err
 }
